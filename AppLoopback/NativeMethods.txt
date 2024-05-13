@@ -1,0 +1,11 @@
+﻿MFLockSharedWorkQueue
+MFStartup
+MFUnlockWorkQueue
+MFPutWorkItem2
+ActivateAudioInterfaceAsync
+IAudioClient
+MFSTARTUP_LITE
+MF_VERSION
+S_OK
+IMFAsyncResult
+MFASYNC_CALLBACK_QUEUE_MULTITHREADED
