@@ -1,0 +1,4 @@
+﻿IAgileObject
+IActivateAudioInterfaceAsyncOperation
+E_NOINTERFACE
+IActivateAudioInterfaceCompletionHandler
