@@ -1,267 +1,129 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using NAudio.CoreAudioApi;
+using NAudio.Wave;
+using ProcLoopback;
+using System;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
+using System.Linq;
+using System.Threading.Tasks;
 
 public class Program
 {
-    private static ProcessLoopbackCapture g_LoopbackCapture = new ProcessLoopbackCapture();
-    private static object g_AudioDataLock = new object();
-    private static List<byte> g_Data = new List<byte>();
+    static WasapiCapture captureDevice = null;
+    static WaveFileWriter writer;
 
-    private const bool WRITE_RAW_FILE = false;
-    private const uint DEFAULT_SAMPLE_RATE = 44100U;
-    private const ushort DEFAULT_BIT_DEPTH = 16;
-    private const ushort DEFAULT_CHANNEL_COUNT = 2;
-
-    public static void Main(string[] args)
+    private static void CleanupCapture()
     {
-        if (CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED) != 0)
+        if (captureDevice != null)
         {
-            Console.WriteLine("Failed to init COM");
-            Environment.Exit(1);
-        }
-
-        uint sampleRate = DEFAULT_SAMPLE_RATE;
-        ushort bitDepth = DEFAULT_BIT_DEPTH;
-        ushort channelCount = DEFAULT_CHANNEL_COUNT;
-
-        if (args.Length >= 1)
-        {
-            if (!uint.TryParse(args[0], out sampleRate))
-            {
-                sampleRate = DEFAULT_SAMPLE_RATE;
-            }
-        }
-
-        if (args.Length >= 2)
-        {
-            if (!ushort.TryParse(args[1], out bitDepth))
-            {
-                bitDepth = DEFAULT_BIT_DEPTH;
-            }
-        }
-
-        if (args.Length >= 3)
-        {
-            if (!ushort.TryParse(args[2], out channelCount))
-            {
-                channelCount = DEFAULT_CHANNEL_COUNT;
-            }
-        }
-
-        Console.WriteLine($"Sample Rate: {sampleRate}");
-        Console.WriteLine($"Bit Depth : {bitDepth}");
-        Console.WriteLine($"Channels  : {channelCount}");
-        Console.WriteLine();
-
-        bool runApplication = true;
-        while (runApplication)
-        {
-            g_Data.Clear();
-
-            uint processId = 0;
-            do
-            {
-                Console.WriteLine("Enter the Process Name to listen to (incl. .exe):");
-                string processName = Console.ReadLine();
-                if (string.IsNullOrEmpty(processName)) continue;
-
-                List<uint> processIds = FindParentProcessIDs(processName);
-                if (processIds.Count > 0) processId = processIds[0];
-            }
-            while (processId == 0);
-
-            Console.WriteLine($"PID: {processId}");
-
-            g_LoopbackCapture.SetCaptureFormat(sampleRate, bitDepth, channelCount, 1);
-            g_LoopbackCapture.SetTargetProcess(processId, true);
-            g_LoopbackCapture.SetCallback(OnDataCapture);
-            g_LoopbackCapture.SetCallbackInterval(40);
-
-            eCaptureError eError = g_LoopbackCapture.StartCapture();
-            if (eError != eCaptureError.NONE)
-            {
-                int hr = g_LoopbackCapture.GetLastErrorResult();
-                Console.WriteLine();
-                Console.WriteLine($"ERROR ({(int)eError}): {GetErrorText(eError)}");
-                Console.WriteLine($"HR: 0x{hr:X}");
-                Console.WriteLine($"HR Text: {new System.ComponentModel.Win32Exception(hr).Message}");
-                Console.WriteLine();
-                continue;
-            }
-
-            Console.WriteLine("Capturing audio.");
-            Console.WriteLine("Press Enter to stop and save.");
-            Console.WriteLine("Type \"discard\" to stop without saving.");
-            Console.WriteLine("Type \"pause\" to pause or resume capture.");
-            Console.WriteLine("Type \"hang\" to simulate a long hang in the callback.");
-            Console.WriteLine("Type \"exit\" to exit the application.");
-
-            while (true)
-            {
-                string input = Console.ReadLine();
-                if (input.Equals("discard", StringComparison.OrdinalIgnoreCase))
-                {
-                    break;
-                }
-                if (input.Equals("pause", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (g_LoopbackCapture.GetState() == eCaptureState.CAPTURING)
-                    {
-                        eCaptureError pauseError = g_LoopbackCapture.PauseCapture();
-                        if (pauseError != eCaptureError.NONE)
-                        {
-                            int hr = g_LoopbackCapture.GetLastErrorResult();
-                            Console.WriteLine();
-                            Console.WriteLine($"ERROR ({(int)pauseError}): {GetErrorText(pauseError)}");
-                            Console.WriteLine($"HR: 0x{hr:X}");
-                            Console.WriteLine($"HR Text: {new System.ComponentModel.Win32Exception(hr).Message}");
-                            Console.WriteLine();
-                        }
-                        else
-                        {
-                            Console.WriteLine("Capture paused");
-                        }
-                    }
-                    else if (g_LoopbackCapture.GetState() == eCaptureState.PAUSED)
-                    {
-                        eCaptureError resumeError = g_LoopbackCapture.ResumeCapture();
-                        if (resumeError != eCaptureError.NONE)
-                        {
-                            int hr = g_LoopbackCapture.GetLastErrorResult();
-                            Console.WriteLine();
-                            Console.WriteLine($"ERROR ({(int)resumeError}): {GetErrorText(resumeError)}");
-                            Console.WriteLine($"HR: 0x{hr:X}");
-                            Console.WriteLine($"HR Text: {new System.ComponentModel.Win32Exception(hr).Message}");
-                            Console.WriteLine();
-                        }
-                        else
-                        {
-                            Console.WriteLine("Capture resumed");
-                        }
-                    }
-                    continue;
-                }
-                if (input.Equals("hang", StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine("Hanging Callback Thread for 10 seconds ...");
-                    lock (g_AudioDataLock)
-                    {
-                        Thread.Sleep(10000);
-                    }
-                    Console.WriteLine("Done.");
-                    continue;
-                }
-                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase))
-                {
-                    runApplication = false;
-                    break;
-                }
-                if (string.IsNullOrEmpty(input))
-                {
-                    g_LoopbackCapture.StopCapture();
-                    string fileName = $"out-{Environment.TickCount}.wav";
-                    Console.WriteLine($"Saving Audio to \"{fileName}\" ...");
-                    g_LoopbackCapture.CopyCaptureFormat(out WAVEFORMATEX format);
-                    WriteWavFile(fileName, g_Data, format);
-                    Console.WriteLine("Done");
-                    break;
-                }
-            }
-            g_LoopbackCapture.StopCapture();
-        }
-
-        CoUninitialize();
-    }
-
-    private static void OnDataCapture(List<byte> data, List<byte> _, object userData)
-    {
-        lock (g_AudioDataLock)
-        {
-            g_Data.AddRange(data);
+            captureDevice.DataAvailable -= CaptureDevice_DataAvailable;
+            captureDevice.RecordingStopped -= CaptureDevice_RecordingStopped;
+            captureDevice.Dispose();
+            captureDevice = null;
         }
     }
 
-    private static void WriteWavFile(string fileName, List<byte> data, WAVEFORMATEX format)
+    private static void CaptureDevice_RecordingStopped(object sender, StoppedEventArgs e)
     {
-        using (FileStream fs = new FileStream(fileName, FileMode.Create, FileAccess.Write))
+        writer.Dispose();
+        writer = null;
+        CleanupCapture();
+    }
+
+    private static void CaptureDevice_DataAvailable(object sender, NAudio.Wave.WaveInEventArgs e)
+    {
+        if(e.BytesRecorded > 0)
         {
-            using (BinaryWriter writer = new BinaryWriter(fs))
+            writer.Write(e.Buffer, 0, e.BytesRecorded);
+        }
+    }
+
+    public static async Task Main(string[] args)
+    {
+        if (args.Length != 3)
+        {
+            Usage();
+            return;
+        }
+        Process process = null;
+        bool isPid = int.TryParse(args[0], out int processId);
+        if (!isPid)
+        {
+            var handle = Process.GetProcessesByName(args[0]).FirstOrDefault().Handle;
+            process = ParentProcessUtilities.GetParentProcess(handle);
+        }
+        else process = ParentProcessUtilities.GetParentProcess(processId);
+
+        bool includeProcessTree;
+        if (args[1] == "includetree")
+        {
+            includeProcessTree = true;
+        }
+        else if (args[1] == "excludetree")
+        {
+            includeProcessTree = false;
+        }
+        else
+        {
+            Usage();
+            return;
+        }
+
+        string outputFileName = args[2];
+        try
+        {
+            if (captureDevice == null)
             {
-                if (!WRITE_RAW_FILE)
-                {
-                    writer.Write(Encoding.ASCII.GetBytes("RIFF"));
-                    writer.Write(0); // Placeholder for file size
-                    writer.Write(Encoding.ASCII.GetBytes("WAVE"));
-                    writer.Write(Encoding.ASCII.GetBytes("fmt "));
-                    writer.Write(Marshal.SizeOf(format));
-                    writer.Write(format.wFormatTag);
-                    writer.Write(format.nChannels);
-                    writer.Write(format.nSamplesPerSec);
-                    writer.Write(format.nAvgBytesPerSec);
-                    writer.Write(format.nBlockAlign);
-                    writer.Write(format.wBitsPerSample);
-                    writer.Write(format.cbSize);
-                    writer.Write(Encoding.ASCII.GetBytes("data"));
-                    writer.Write(data.Count);
-                    writer.Write(data.ToArray());
+                captureDevice = await WasapiCapture.CreateForProcessCaptureAsync(process.Id, includeProcessTree);
+                captureDevice.DataAvailable += CaptureDevice_DataAvailable;
+                captureDevice.RecordingStopped += CaptureDevice_RecordingStopped;
+                var file = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, outputFileName);
+                writer = new WaveFileWriter(file, captureDevice.WaveFormat);
+                captureDevice.StartRecording();
+                Console.WriteLine($"Process: {process.ProcessName} - PID: {process.Id}");
+                Console.WriteLine("Capturing 10 seconds of audio.");
 
-                    long fileSize = fs.Length;
-                    fs.Seek(4, SeekOrigin.Begin);
-                    writer.Write((int)(fileSize - 8));
-                    fs.Seek(40, SeekOrigin.Begin);
-                    writer.Write(data.Count);
-                }
-                else
-                {
-                    writer.Write(data.ToArray());
-                }
+                await Task.Delay(10000);
+                captureDevice.StopRecording();
+                Console.WriteLine("Finished.");
+                await Task.Delay(1000);
             }
+            else
+            {
+                captureDevice.StopRecording(); // WAV File will be completed in recording stopped
+            }
+
         }
-    }
-
-    private static List<uint> FindParentProcessIDs(string executableName)
-    {
-        List<uint> processIdList = new List<uint>();
-        foreach (Process process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executableName)))
+        catch (Exception ex)
         {
-            processIdList.Add((uint)process.Id);
-        }
-        return processIdList;
+            Console.WriteLine($"Failed to start capture\n0x{ex.HResult:X}: {ex.Message}");
+            CleanupCapture();
+        }    
     }
 
-    private static string GetErrorText(eCaptureError error)
+    static void Usage()
     {
-        return error switch
-        {
-            eCaptureError.NONE => "Success",
-            eCaptureError.PARAM => "Invalid parameter",
-            eCaptureError.STATE => "Invalid operation for current state",
-            eCaptureError.NOT_AVAILABLE => "Feature not available",
-            eCaptureError.FORMAT => "CaptureFormat is invalid or not initialized",
-            eCaptureError.PROCESSID => "ProcessId is invalid (0/not set)",
-            eCaptureError.DEVICE => "Failed to get device",
-            eCaptureError.ACTIVATION => "Failed to activate device",
-            eCaptureError.INITIALIZE => "Failed to init device",
-            eCaptureError.SERVICE => "Failed to get interface pointer via service",
-            eCaptureError.START => "Failed to start capture",
-            eCaptureError.STOP => "Failed to stop capture",
-            eCaptureError.EVENT => "Failed to create and set event",
-            eCaptureError.INTERFACE => "Failed to call Windows interface function",
-            _ => "Unknown"
-        };
+        Console.WriteLine(
+            "Usage: ApplicationLoopback <pid|app.exe> <includetree|excludetree> <outputfilename>\n" +
+            "\n" +
+            "<pid> is the process ID to capture or exclude from capture\n" +
+            "<app.exe> is the process name to capture or exclude from capture\n" +
+            "includetree includes audio from that process and its child processes\n" +
+            "excludetree includes audio from all processes except that process and its child processes\n" +
+            "<outputfilename> is the WAV file to receive the captured audio (10 seconds)\n" +
+            "\n" +
+            "Examples:\n" +
+            "\n" +
+            "ApplicationLoopback 1234 includetree CapturedAudio.wav\n" +
+            "\n" +
+            "  Captures audio from parent process of 1234 and its children.\n" +
+            "\n" +
+            "ApplicationLoopback msedge.exe includetree CapturedAudio.wav\n" +
+            "\n" +
+            "  Captures audio from parent process of msedge and its children.\n" +
+            "\n" +
+            "ApplicationLoopback 1234 excludetree CapturedAudio.wav\n" +
+            "\n" +
+            "  Captures audio from all processes except parent process of 1234 and its children.\n");
     }
-
-    [DllImport("ole32.dll")]
-    private static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
-
-    [DllImport("ole32.dll")]
-    private static extern void CoUninitialize();
-
-    private const uint COINIT_MULTITHREADED = 0x0;
-    private const uint COINIT_APARTMENTTHREADED = 0x2;
 }
