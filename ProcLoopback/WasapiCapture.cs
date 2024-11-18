@@ -30,6 +30,7 @@ namespace NAudio.CoreAudioApi
         private EventWaitHandle frameEventWaitHandle;
         private readonly int audioBufferMillisecondsLength;
         private AudioClientStreamFlags audioClientStreamFlags;
+        public int BufferFrameCountParam { get; set; }
 
         /// <summary>
         /// Indicates recorded data is available 
@@ -89,7 +90,7 @@ namespace NAudio.CoreAudioApi
             //waveFormat = audioClient.MixFormat;
         }
 
-        public static async Task<WasapiCapture> CreateForProcessCaptureAsync(int processId, bool includeProcessTree)
+        public static async Task<WasapiCapture> CreateForProcessCaptureAsync(int processId, bool includeProcessTree, int bufferFrameCount = 2000)
         {
             // https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/ApplicationLoopback/cpp/LoopbackCapture.cpp
             var activationParams = new AudioClientActivationParams()
@@ -118,6 +119,7 @@ namespace NAudio.CoreAudioApi
                 var icbh = new ActivateAudioInterfaceCompletionHandler1(ac2 => {
                     var audioClient = new AudioClient(ac2);
                     capture = new WasapiCapture(audioClient, true, 100);
+                    capture.BufferFrameCountParam = bufferFrameCount;
                     capture.audioClientStreamFlags |= AudioClientStreamFlags.Loopback;
                     capture.WaveFormat = new WaveFormat(); // ask for capture at 44.1, stereo 16 bit
                 });
@@ -212,7 +214,7 @@ namespace NAudio.CoreAudioApi
             //TODO - Changed because audioClient.BufferSize is zero, maybe is also not allowed to access. VBAudioRouter copies the buffer in this way:
             //https://github.com/ShortDevelopment/VB-Audio-Router/blob/main/VBAudioRouter.Capture/ProcessAudioCapture.cs#L84
             //int bufferFrameCount = audioClient.BufferSize;
-            int bufferFrameCount = 2000;
+            int bufferFrameCount = BufferFrameCountParam;
             bytesPerFrame = waveFormat.Channels * waveFormat.BitsPerSample / 8;
             recordBuffer = new byte[bufferFrameCount * bytesPerFrame];
 
